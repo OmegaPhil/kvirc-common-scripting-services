@@ -1,0 +1,495 @@
+# Common Scripting Services
+# =========================
+
+# Version: 1
+
+/*
+Copyright (C) 2013 OmegaPhil (OmegaPhil+KVIrc@gmail.com)
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+
+# ALIASES BLOCK
+# autojoin alias
+# This has been moved here as I want it as a user alias too
+alias(autojoin)
+{
+    # Note that joinpass shares similar code
+    
+    # Making sure the network exists in the server database (Omega Net doesn't for some reason) - otherwise querying information on the network errors
+    if ($serverdb.networkExists($context.networkName) == $true)
+    {
+        # Building a hash of currently-joined channels on the current server (ignores any dead channels)
+        foreach(%channelWindowID,$window.list("channel"))
+        {
+            if ($chan.isDead(%channelWindowID) == 0)
+            {
+                %channel = $chan.name(%channelWindowID)
+                %joinedChannels{%channel} = %channel
+            }
+        }
+    
+        # Obtaining autojoin channels - commas in channel name/password??
+        %channels = $str.split(",",$serverdb.networkJoinChannels($context.networkName))
+        
+        # Looping through all autojoin channels
+        foreach(%channelData,%channels)
+        {
+            # Obtaining channel and key - max fields of 2 to ensure that a colon in the password doesn't screw things up. Hopefully no channel will have a colon in its name...
+            %channelData = $str.split(":",%channelData,,2)
+            
+            # Joining channel if I haven't already
+            if (%joinedChannels{%channelData[0]} == "")
+            {
+                # Debug code
+                # echo "Debug - Joining "%channelData[0]
+
+                join %channelData[0] %channelData[1]
+            }
+        }
+    }
+}
+
+# DelayedGrantRank alias
+# Is intended to be called on the relevant network
+# Usage: DelayedGrantRank <channel> <nick> <rank to give, '+%@&~'> [<rank to take away, '+%@&~'>]
+alias(DelayedGrantRank)
+{ 
+    # Variable allocation
+    %timerDelay = 0
+    
+    # Making sure a channel was passed
+    if ($0 == "")
+    {
+        # It wasnt - throwing an error
+        error "DelayedGrantRank - channel was not passed."
+    }
+ 
+    # Setting channel
+    %channel = $0
+
+    # Making sure a nick was passed
+    if ($1 == "")
+    {
+        # It wasnt - throwing an error
+        error "DelayedGrantRank - nick was not passed. Parameters: '$0-'"
+    }
+ 
+    # Setting nick
+    %nick = $1
+
+    # Setting rankToGive (no rank to give is allowed as the user may just want to take away rank)
+    %rankToGive = $2
+    
+    # Validating
+    %rankToValidate = $str.replace(%rankToGive, "+", "")
+    %rankToValidate = $str.replace(%rankToValidate, "%", "")
+    %rankToValidate = $str.replace(%rankToValidate, "@", "")
+    %rankToValidate = $str.replace(%rankToValidate, "&", "")
+    %rankToValidate = $str.replace(%rankToValidate, "~", "")
+    if (%rankToValidate != "")
+    {
+        # An invalid rank has been passed - throwing an error
+        error "DelayedGrantRank - The rank to give ('"%rankToGive"') is not valid. Parameters: '$0-'"
+    }
+
+    # Checking to see if a rank to take away was passed
+    if ($3 != "")
+    {
+        # It was - setting rankToTakeAway
+        %rankToTakeAway = $3
+        
+        # Validating
+        %rankToValidate = $str.replace(%rankToTakeAway, "+", "")
+        %rankToValidate = $str.replace(%rankToValidate, "%", "")
+        %rankToValidate = $str.replace(%rankToValidate, "@", "")
+        %rankToValidate = $str.replace(%rankToValidate, "&", "")
+        %rankToValidate = $str.replace(%rankToValidate, "~", "")
+        if (%rankToValidate != "")
+        {
+            # An invalid rank has been passed - throwing an error
+            error "The rank to take away ('"%rankToTakeAway"') is not valid. Parameters: '$0-'"
+        }
+    }
+    
+    # KVIrc script does not have a sleep, so any delay must be implemented by timers. Either taking away or giving rank can be done at once - both and the server appears to ignore one command group. Therefore this must be done via two timers
+    # Creating timer to take away rank if there is a need
+    if (%rankToTakeAway != "")
+    {
+        %timerDelay += 2000
+        timer -s ("CommonScriptingService_DelayedGrantRank_TakeAway_$rand", %timerDelay, $context.networkName, %channel, %nick, %rankToTakeAway)
+        {
+            # Debug code
+            #echo "Parameters: $0-"
+            
+            # Setting network
+            %network = $0
+
+            # Setting channel
+            %channel = $1
+
+            # Setting nick
+            %nick = $2
+
+            # Setting rankToTakeAway
+            %rankToTakeAway = $3
+            
+            # Obtaining network's IRC context
+            foreach(%context,$context.list)
+            {
+                if ($context.networkName(%context) == %network)
+                {
+                    %iRCContext = %context
+                    break
+                }
+            }
+            
+            # Making sure the network was found
+            if (%iRCContext == "")
+            {
+                # It wasnt - raising error
+                error "The specified network ('"%network"') has not been found. Parameters: '$0-'"
+            }
+            
+            # Obtaining channels's window ID
+            %channelWindowID = $channel(%channel, %iRCContext)
+
+            # Making sure the channel was found
+            if (%channelWindowID == 0)
+            {
+                # It wasnt - raising error
+                error "DelayedGrantRank - The specified channel '"%channel"' has not been found on "%network". Parameters: '$0-'"
+            }
+
+            # Exiting if the user is not in the channel
+            if ($chan.ison(%nick, %channelWindowID) == 0) return
+            
+            # Rebinding to channel window so that rank commands are usable
+            rebind %channelWindowID
+            
+            # Removing rank as appropriate
+            if ($str.contains(%rankToTakeAway, "+") == 1 && $chan.isVoice(%nick) == 1) devoice %nick
+            if ($str.contains(%rankToTakeAway, "%") == 1 && $chan.isHalfOP(%nick) == 1) dehalfop %nick
+            if ($str.contains(%rankToTakeAway, "@") == 1 && $chan.isOP(%nick) == 1) deop %nick
+            if ($str.contains(%rankToTakeAway, "&") == 1 && $chan.isAdmin(%nick) == 1) dechanadmin %nick
+            if ($str.contains(%rankToTakeAway, "~") == 1 && $chan.isOwner(%nick) == 1) dechanowner %nick
+        }
+    }
+
+    # Creating timer to give rank if there is a need
+    if (%rankToGive != "")
+    {
+        %timerDelay += 2000
+        timer -s ("CommonScriptingService_DelayedGrantRank_Give_$rand", %timerDelay, $context.networkName, %channel, %nick, %rankToGive)
+        {
+            # Debug code
+            # echo "Parameters: $0-"
+            
+            # Setting network
+            %network = $0
+
+            # Setting channel
+            %channel = $1
+
+            # Setting nick
+            %nick = $2
+
+            # Setting rankToGive
+            %rankToGive = $3
+            
+            # Obtaining network's IRC context
+            foreach(%context,$context.list)
+            {
+                if ($context.networkName(%context) == %network)
+                {
+                        %iRCContext = %context
+                        break
+                }
+            }
+            
+            # Making sure the network was found
+            if (%iRCContext == "")
+            {
+                # It wasnt - raising error
+                error "DelayedGrantRank - The specified network ('%network') has not been found. Parameters: '$0-'"
+            }
+            
+            # Obtaining channels's window ID
+            %channelWindowID = $channel(%channel, %iRCContext)
+
+            # Making sure the channel was found
+            if (%channelWindowID == 0)
+            {
+                # It wasnt - raising error
+                error "DelayedGrantRank - The specified channel '%channel' has not been found on %network"". Parameters: '$0-'"
+            }
+
+            # Exiting if the user is not in the channel
+            if ($chan.ison(%nick, %channelWindowID) == 0) return
+            
+            # Rebinding to channel window so that rank commands are usable
+            rebind %channelWindowID
+            
+            # Giving rank as required
+            if ($str.contains(%rankToGive, "+") == 1 && $chan.isVoice(%nick) != 1) voice %nick
+            if ($str.contains(%rankToGive, "%") == 1 && $chan.isHalfOP(%nick) != 1) halfop %nick
+            if ($str.contains(%rankToGive, "@") == 1 && $chan.isOP(%nick) != 1) op %nick
+            if ($str.contains(%rankToGive, "&") == 1 && $chan.isAdmin(%nick) != 1) chanadmin %nick
+            if ($str.contains(%rankToGive, "~") == 1 && $chan.isOwner(%nick) != 1) chanowner %nick    
+        }
+    }
+}
+
+# duration alias
+# Usage: duration <seconds>
+alias(duration)
+{ 
+    # Setting duration
+    %duration = $0
+
+    # KVIrc script does not know the difference between "" and 0!    
+    # Making sure duration is an integer
+    if ($typeof(%duration) != "integer")
+    {
+        # It isn't - throwing an error
+        error "duration has been called with a value that isn't an integer ('%duration')"
+    }
+    
+    # Dealing with years (365 days)
+    if (%duration >= 31536000)
+    {
+        %intValue = $integer($(%duration / 31536000))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%intValue year "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%intValue years "
+                break
+            }
+        }
+        %duration -= $(%intValue * 31536000)
+    }
+    
+    # Debug code
+    /*
+    echo "\%intValue: %intValue"
+    echo "\%formattedDuration: %formattedDuration"
+    echo "\%duration: %duration"
+    */
+
+    # Dealing with months (30 days)
+    if (%duration >= 2592000)
+    {
+        %intValue = $integer($(%duration / 2592000))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%intValue month "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%intValue months "
+                break
+            }
+        }
+        %duration -= $(%intValue * 2592000)
+    }
+
+    # Dealing with weeks
+    if (%duration >= 604800)
+    {
+        %intValue = $integer($(%duration / 604800))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%intValue week "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%intValue weeks "
+                break
+            }
+        }
+        %duration -= $(%intValue * 604800)
+    }
+
+    # Dealing with days
+    if (%duration >= 86400)
+    {
+        %intValue = $integer($(%duration / 86400))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%intValue day "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%intValue days "
+                break
+            }
+        }
+        %duration -= $(%intValue * 86400)
+    }
+
+    # Dealing with hours
+    if (%duration >= 3600)
+    {
+        %intValue = $integer($(%duration / 3600))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%intValue hour "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%intValue hours "
+                break
+            }
+        }
+        %duration -= $(%intValue * 3600)
+    }
+
+    # Dealing with minutes
+    if (%duration >= 60)
+    {
+        %intValue = $integer($(%duration / 60))
+        switch (%intValue)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%intValue minute "
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%intValue minutes "
+                break
+            }
+        }
+        %duration -= $(%intValue * 60)
+    }
+
+    # Dealing with seconds
+    if (%duration >= 0)
+    {
+        switch (%duration)
+        {
+            case (1):
+            {
+                %formattedDuration = "%formattedDuration%duration second"
+                break
+            }
+            default:
+            {
+                %formattedDuration = "%formattedDuration%duration seconds"
+                break
+            }
+        }
+    }
+    
+    # Returning formatted duration
+    return %formattedDuration
+}
+
+# joinpass alias
+# Allows for a single command to allow joining channels protected with a key on the current network (also works for non-key-protected channels) - this only works for network-level autojoin channels where a key is recorded - there doesn't appear to be functionality to get at registered channels (see 'channelsjoin.open' in the help)
+# Usage: joinpass <channel>
+alias(joinpass)
+{
+    # Note that autojoin shares similar code
+
+    # Variable allocation
+    %channel = $0
+
+    # Making sure a channel was passed
+    if (%channel == "") error "joinpass was called without passing a channel"
+
+    # Making sure the network exists in the server database (Omega Net doesn't for some reason) - otherwise querying information on the network errors
+    if ($serverdb.networkExists($context.networkName) == $true)
+    {
+        # Obtaining autojoin channels - commas in channel name/password??
+        %channels = $str.split(",",$serverdb.networkJoinChannels($context.networkName))
+
+        # Debug code
+        # echo "Autojoin channels: "%channels
+        
+        # Searching for desired channel amongst autojoin channels
+        %results = $str.grep(%channel":*", %channels, w)
+
+        # Debug code
+        # echo "Results searching for "%channel": "%results
+
+        # Erroring if the desired channel has not been found. One example of this is where the channel name is passed in with mIRC control codes (bold)
+        if (%results == "") error "joinpass has been called to join '%channel', however this channel does not exist in the network autojoin channels for $context.networkName"
+        
+        # Obtaining channel and key - max fields of 2 to ensure that a colon in the password doesn't screw things up. Hopefully no channel will have a colon in its name...
+        %channelData = $str.split(":",%results,,2)
+
+        # Attempting to join the channel    
+        join %channel %channelData[1]
+    }
+}
+
+# trueround alias
+# Rounds up or down to an integer a number as appropriate
+# Usage: trueround <number>
+alias(trueround)
+{
+    # KVIrc script does not know the difference between "" and 0!
+    # Making sure passed value is a number
+    if ($typeof($0) != "integer" && $typeof($0) != "real")
+    {
+        # It isn't - throwing an error
+        error "trueround has been called with something that isn't a number ('$0')"
+    }
+
+    # Setting x
+    %x = $0
+
+    # Returning rounded value
+    if (%x >= $($math.floor(%x) + 0.5))
+    {
+        return $math.ceil(%x)
+    }
+    else
+    {
+        return $math.floor(%x)
+    }
+}
+
+# Uninstaller alias
+alias(CommonScriptingServices::uninstall::uninstall)
+{
+    # All events and aliases should be uninstalled here
+    alias(autojoin) {}
+    alias(DelayedGrantRank) {}
+    alias(duration) {}
+    alias(joinpass) {}
+    alias(trueround) {}
+    alias(CommonScriptingServices::uninstall::uninstall) {}
+}
